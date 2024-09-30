@@ -1,0 +1,365 @@
+---
+title: "Story 2"
+author: "Naomi Buell"
+format: pptx
+editor: visual
+---
+
+```{r}
+#| label: load packages
+#| message: false
+library(tidyverse)
+library(janitor)
+library(jsonlite)
+# Per instructions: https://www.bls.gov/developers/api_r.htm
+# library(devtools)
+# install_github("mikeasilva/blsAPI")
+library(blsAPI)
+library(fredr)
+```
+
+## Intro
+
+The Federal Reserve's mandate from Congress is to control inflation and to maintain low unemployment. These seem to be contradictory objectives. For this story, I source the following data for the last 25 years to create data visualizations to answer the question: "Has the FED been able to fulfill the mandate given to it by Congress?"
+
+-   The Consumer Price Index (CPI) (Bureau of Labor Statistics)
+
+-   The FED Funds Rate (FRED) (Federal Reserve Board)
+
+-   Unemployment Rates (Bureau of Labor Statistics) – U3 and U6
+
+As a reminder, the FED raises rate after reviewing the CPI and other data and unemployment (layoffs) occur after company operating costs go up.
+
+## Get data through APIs
+
+### Bureau of Labor Statistics (BLS) API: Consumer Price Index (CPI) and unemployment rates
+
+First, I get BLS data.
+
+```{r}
+#| label: set up BLS API
+#| error: true
+#| message: false
+#| warning: false
+#| results: hide
+
+# registrationkey <- rstudioapi::askForPassword("Authorization Key")
+registrationkey <- "43428968c34741fab188f98db57ba119" # Alternative to API key generated with the askForPassword function for the purposes of rendering my QMD
+
+base_url <- "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+seriesid <- c("CUUR0000SA0", # Consumer Price Index for All Urban Consumers
+              "LNS14000000", # Civilian unemployment rate U-3
+              "LNS13327709") # Civilian unemployment rate U-6, alternative measure of labor underutilization. This broader measure includes the underutilized part-time workers who would prefer to work full time, as well as individuals who are too discouraged to try to find work or who are only marginally attached to the labor market for a miscellany of other reasons.
+
+# Since BLS has a max retrieval of 20 years, I split this up into two requests of 15 year increments to get all 25 years of data (there will be overlap, which we will remove later).
+years <- list(c(year(today())-15, year(today())), 
+              c(year(today())-25, year(today())-10))
+```
+
+Since BLS has a max retrieval of 20 years, I split this up into two requests.
+
+```{r}
+#| label: payloads and responses
+
+# Prepare empty lists to store the payloads and responses
+payload_list <- list()
+response_list <- list()
+
+# Perform 
+for (n in 1:2) {
+  # Store payloads in the list
+  payload_list[[n]] <- list(
+    "seriesid" = seriesid, 
+    "startyear" = as.character(years[[n]][1]), 
+    "endyear" = as.character(years[[n]][2]),
+    "registrationkey" = registrationkey
+  )
+
+  # Query the API using blsAPI and store the response as raw JSON
+  response_list[[n]] <- fromJSON(blsAPI(payload_list[[n]]))[["Results"]][["series"]][["data"]]
+}
+```
+
+I bind data together from multiple pulls.
+
+```{r}
+#| label: bind and clean data
+
+# Combine 1st and 2nd retrievals for both series, removing overlap, and cleaning vars. 
+cpi <- bind_rows(response_list[[1]][[1]], response_list[[2]][[1]]) |>
+  unique() |>
+  rename(cpi = value)
+
+u3 <- bind_rows(response_list[[1]][[2]], response_list[[2]][[2]]) |>
+  unique() |>
+  rename(u3 = value)
+
+u6 <- bind_rows(response_list[[1]][[3]], response_list[[2]][[3]]) |>
+  unique() |>
+  rename(u6 = value)
+
+bls <- full_join(cpi, u3) |> 
+  full_join(u6) |> 
+  clean_names() |>
+  mutate(
+    period = substr(period, 2, 3) |> as.integer(),
+    year = year |> as.integer(),
+    cpi = cpi |> as.numeric(),
+    u3 = u3 |> as.numeric(),
+    u6 = u6 |> as.numeric()
+  ) |>
+  select(-c(latest, footnotes))
+
+head(bls)
+```
+
+### The FED Funds Rate (FRED) (Federal Reserve Board)
+
+Second, I pull fed funds rate data.
+
+```{r}
+#| label: set up FRED API
+#| error: true
+#| message: false
+#| warning: false
+#| results: hide
+
+# api_key <- rstudioapi::askForPassword("Authorization Key")
+api_key <- "e5fbd2da1612b8f63abab82e9d1d7bed" # Alternative to API key generated with the askForPassword function for the purposes of rendering my QMD
+fredr_set_key(api_key)
+
+fedfunds <- fredr(
+  series_id = "FEDFUNDS",
+  observation_start = today()-years(25), # 25 years ago
+  observation_end = today()
+) |> 
+  clean_names() |> 
+  rename(fedfunds = value) |> 
+  mutate(year = year(date),
+         period = month(date)) |> 
+  select(year, period, fedfunds)
+
+head(fedfunds)
+```
+
+Merge both BLS and FRED data.
+
+```{r}
+#| label: merge data into one df
+
+df <- full_join(fedfunds, bls) |> 
+  mutate(date = paste0(year, "-", period, "-01") |> 
+           as_date()) |> 
+  arrange(date) |> 
+  select(date, fedfunds, cpi, u3, u6)
+
+head(df)
+```
+
+## Manipulate data
+
+I further manipulate the data by adding the following variables:
+
+-   add information on recessions
+
+-   calculate underemployment rate
+
+-   use monthly values of the CPI and calculate the inflation year on year, that is the inflation rate in month “t” compared to month “t-12” compared to the unemployment rate in month “t”
+
+-   add quantitative easing timing
+
+```{r}
+#| label: add variables for graphing
+# add recessions
+df <- df |>
+  arrange(date) |>  # Order data by date
+  mutate(
+    # Add recession timing
+    dotcom = between(date, as_date("2001-03-01"), as_date("2001-11-01")),
+    greatrecession = between(date, as_date("2007-12-01"), as_date("2009-06-01")),
+    covid = between(date, as_date("2020-02-01"), as_date("2020-04-01")),
+    recession = dotcom | greatrecession | covid,
+    # Calculate underemployment as the gap between u6 and u3 enemployment measures
+    underemployment = u6 - u3,
+    # Calculate year-on-year inflation rate
+    inflation = (cpi - lag(cpi, 12)) / lag(cpi, 12) * 100,
+    # Add QE timing
+    qe = if_else(
+      date == as_date("2008-11-01") |
+        date == as_date("2010-11-01") |
+        date == as_date("2012-09-01") |
+        date == as_date("2020-03-01"),
+      inflation,
+      NA
+    )
+  )
+```
+
+## Graph data
+
+In this section, I produce graphs to check if inflation is in control and low unemployment was maintained for the last 25 years.
+
+### Plot both measures of unemployment with recessions.
+
+Create plot as a basis for other plots:
+
+```{r}
+#| label: Create a ggplot plotting recessions over time that will be the template for other graphs
+base_graph <- df |>
+  ggplot(aes(x = date)) +
+  # Shaded regions for recessions
+  geom_rect(
+    data = df |> filter(dotcom == TRUE),
+    aes(
+      xmin = date,
+      xmax = lead(date, default = last(date)),
+      ymin = -Inf,
+      ymax = Inf,
+      fill = "Recessions"  # Add label to gray boxes
+    )
+  ) +
+  geom_rect(
+    data = df |> filter(greatrecession == TRUE), aes(
+      xmin = date,
+      xmax = lead(date, default = last(date)),
+      ymin = -Inf,
+      ymax = Inf,
+      fill = "Recessions"  # Keep same label for consistency in legend
+    )
+  ) +
+  geom_rect(
+    data = df |> filter(covid == TRUE),
+    aes(
+      xmin = date,
+      xmax = lead(date, default = last(date)),
+      ymin = -Inf,
+      ymax = Inf,
+      fill = "Recessions"  # Keep same label for consistency in legend
+    )
+  ) +
+  scale_fill_manual(values = c("Recessions" = "grey"), name = "") +
+  # Adjust theme, colors, labels, and scale
+  theme_minimal() +
+  theme(panel.grid = element_blank(), legend.position = "bottom") +
+  scale_x_date(breaks = scales::pretty_breaks(n = 10),
+               date_labels = "%Y") +
+  labs(x = NULL) +
+  scale_y_continuous(labels = scales::percent)
+```
+
+Plot unemployment on the graph.
+
+```{r}
+#| label: plot unemp
+
+base_graph +
+  geom_line(aes(y = u6/100, color = "Unemployment, including underemployment")) +
+  geom_line(aes(y = u3/100, color = "Unemployment")) +
+  labs(y = NULL) +
+  scale_color_manual(
+    values = c(
+      "Unemployment" = "black",
+      "Unemployment, including underemployment" = "red"
+    ),
+    name = ""
+  ) 
+```
+
+I calculate a few stats I'd like to call out below:
+
+```{r}
+aug_2024_u3_count <- 7115*1000
+aug_2024_u3_perc <- df |> filter(date == as_date("2024-08-01")) |> select(u3)
+aug_2024_u6_perc <- df |> filter(date == as_date("2024-08-01")) |> select(u6)
+aug_2024_u6_count <- aug_2024_u3_count/aug_2024_u3_perc*aug_2024_u6_perc
+```
+
+### Plot underemployment
+
+Plot the gap between u3 and u6 unemployment: underemployment. This includes the underutilized part-time workers who would prefer to work full time, as well as individuals who are too discouraged to try to find work or who are only marginally attached to the labor market for a miscellany of other reasons.
+
+First, I calculate a few stats to call out in the presentation.
+
+```{r}
+#| label: get stats
+
+df |> select(underemployment, u6, u3) |> summary()
+df |> filter(recession == TRUE) |> select(underemployment, u6, u3) |> summary()
+
+multiplier_rec <- (mean(df[df$recession == TRUE, ]$u6) / mean(df[df$recession == TRUE, ]$u3))
+multiplier <- (mean(df$u6) / mean(df$u3))
+
+df |> filter(year(date) < 2008) |> select(underemployment) |> summary()
+
+covid_underemployment_min <- df |> filter(covid == TRUE) |> select(underemployment) |> min()
+covid_underemployment_max <- df |> filter(covid == TRUE) |> select(underemployment) |> max()
+covid_underemployment_spike <- covid_underemployment_max / covid_underemployment_min
+```
+
+Next, I plot underemployment over time.
+
+```{r}
+#| label: plot diff between types of unemployment over time
+
+base_graph +
+  # Line for underemployment
+  geom_line(
+    aes(y = underemployment / 100, color = "Rate of part-time workers unable to work full time")) +
+  labs(y = NULL) +
+  theme(panel.grid = element_blank(), legend.position = "bottom") +
+  scale_color_manual(
+    values = c("Rate of part-time workers unable to work full time" = "red"),
+    name = ""
+  ) 
+
+```
+
+### Fed funds impact
+
+When did the Fed raise and lower interest rates?
+
+```{r}
+#| label: FED timeline
+#| warning: false
+
+base_graph +
+  geom_line(aes(y = fedfunds / 100, color = "red"),
+            size = .5,
+            show.legend = FALSE) +
+  labs(y = "Federal Funds Rate") +
+  theme(legend.position = "none")
+```
+
+### CPI data
+
+Here I try to show that inflation is caused by quantitative easing.
+
+```{r}
+#| label: graph QE and inflation.
+#| warning: false
+
+base_graph +
+  # Inflation line
+  geom_line(aes(y = inflation/100, color = "Inflation"), linewidth = 0.5) +
+  geom_point(aes(y = qe/100, color = "QE occurs"), size = 2) +
+  
+  # Target inflation rate line
+  geom_hline(aes(yintercept = .02, linetype = "Target inflation rate = 2%"), alpha = .5) +
+  
+  # Labels and theme adjustments
+  labs(y = "Year-to-Year Inflation") +
+  
+  # Color and linetype manual scales for the legend
+  scale_color_manual(values = c("Inflation" = "red", "QE occurs" = "black"), name = "") +
+  scale_linetype_manual(values = c("Target inflation rate = 2%" = "dashed"), name = "") +
+  
+  # Customizing how the legend items are displayed
+  guides(
+    color = guide_legend(override.aes = list(
+      linetype = c("solid", "blank"),  # Solid line for Inflation, blank for QE
+      shape = c(NA, 16)  # No shape for Inflation, point shape for QE
+    )),
+    linetype = guide_legend(override.aes = list(size = 0.5))  # Dashed line for Target Inflation Rate
+  )
+
+```
