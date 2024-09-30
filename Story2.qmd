@@ -303,15 +303,16 @@ Next, I plot underemployment over time.
 
 base_graph +
   # Line for underemployment
-  geom_line(
-    aes(y = underemployment / 100, color = "Rate of part-time workers unable to work full time")) +
+  geom_line(aes(y = underemployment / 100, color = "Underemployment")) +
+  # Add dashed horizontal line with a label
+  geom_line(aes(y = 0.04, color = "Pre-crisis rate of underemployment = 4%"),
+            linetype = "dashed") +
   labs(y = NULL) +
-  theme(panel.grid = element_blank(), legend.position = "bottom") +
-  scale_color_manual(
-    values = c("Rate of part-time workers unable to work full time" = "red"),
+  scale_color_manual(values = c("Underemployment" = "red"), name = "") +
+  scale_linetype_manual(
+    values = c("Pre-crisis rate of underemployment = 4%" = "dashed"),
     name = ""
-  ) 
-
+  )
 ```
 
 ### Fed funds impact
