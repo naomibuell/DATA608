@@ -343,9 +343,6 @@ base_graph +
   geom_line(aes(y = inflation/100, color = "Inflation"), linewidth = 0.5) +
   geom_point(aes(y = qe/100, color = "QE occurs"), size = 2) +
   
-  # Target inflation rate line
-  geom_hline(aes(yintercept = .02, linetype = "Target inflation rate = 2%"), alpha = .5) +
-  
   # Labels and theme adjustments
   labs(y = "Year-to-Year Inflation") +
   
@@ -361,5 +358,4 @@ base_graph +
     )),
     linetype = guide_legend(override.aes = list(size = 0.5))  # Dashed line for Target Inflation Rate
   )
-
 ```
