@@ -1,0 +1,291 @@
+---
+title: "Story 2: Do stricter gun laws reduce firearm gun deaths?"
+author: "Naomi Buell"
+format: pptx
+editor: visual
+---
+
+```{r}
+#| label: load packages
+#| message: false
+library(tidyverse)
+library(janitor)
+library(jsonlite)
+## Install the required package with:
+## install.packages("RSocrata")
+library("RSocrata")
+```
+
+## Intro
+
+The CDC publishes firearm mortality for each State per 100,000 persons <https://www.cdc.gov/nchs/pressroom/sosmap/firearm_mortality/firearm.htm>. Each State' firearm control laws can be categorized as very strict to very lax. The purpose of this Story is to answer the question, " Do stricter firearm control laws help reduce firearm mortality?"
+
+For this assignment I:
+
+-   Access the firearm mortality data from the CDC using an available API (<https://open.cdc.gov/apis.html>)
+-   Create a 5 point Likert scale categorizing gun control laws from most lax to strictest and assign each state to the most appropriate Likert bin
+-   Determine whether stricter gun control laws result in reduced gun violence deaths
+-   Present my story using heat maps
+-   Use an accessible color palette
+
+## Get data through API
+
+First, I get the firearm data, following instructions online: <https://dev.socrata.com/foundry/data.cdc.gov/489q-934x>.
+
+```{r}
+#| label: set up CDC API
+#| error: true
+#| message: false
+#| warning: false
+#| results: hide
+
+# API credentials
+base_url <- "https://data.cdc.gov/resource/489q-934x.json"
+#api_key_id <- "38ry4jgwz2h1qnzjsty0vxl6c"
+#api_key_secret <- "31isupy4vc48mlejhzzsjk97cxmingh0xog6aim7rrp78azfd7"
+app_token <- "sx3mlnOPJgxWbgMEi9vT6hg9I"
+#secret_token <- "qWL9VKXpdEMeVNR53WwiNZjewUBHGWMokCvh"
+spsmail <- "naomi.buell13@spsmail.cuny.edu"
+password <- "Mi6P&ZPQt3eCRKQ3"
+
+# API filters
+cause_of_death <- "Firearm-related injury"
+rate_type <-  "Age-adjusted"
+time_period <- "12 months ending with quarter"
+
+# Create URL, modeling this example: https://data.cdc.gov/resource/489q-934x.json?cause_of_death=All causes
+composite_url <- paste0(base_url,
+              "?cause_of_death=",
+              cause_of_death,
+              "&rate_type=",
+              rate_type,
+              "&time_period=",
+              time_period)
+```
+
+Retrieve the data using the API and clean data frame. I elect to use quarterly age-adjusted death rates per 100,000 (calculated over the past 12 months) from firearm-related injuries.
+
+```{r}
+#| label: read firearms deaths and clean
+
+df <- read.socrata(
+  composite_url,
+  app_token = app_token,
+  email     = spsmail,
+  password  = password
+) |>
+  select(-c(time_period, cause_of_death, rate_type, unit)) |>
+  pivot_longer(
+    starts_with("rate"),
+    names_to = "rate",
+    values_to = "Deaths per 100,000",
+    names_prefix = "rate_"
+  ) |>
+  clean_names() |>
+  separate_wider_regex(year_and_quarter,
+                       patterns = c(year = "[0-9]+", " Q", quarter = "[0-9]+")) |> 
+  mutate(year = year |> as.numeric(),
+         quarter = quarter |>  as.numeric(),
+         deaths_per_100_000 = deaths_per_100_000 |> as.numeric()) |> 
+  drop_na() |> 
+  arrange(desc(year), desc(quarter), rate)
+
+head(df)
+```
+
+## Import and categorize gun control laws
+
+Create a 5 point Likert scale categorizing gun control laws from most lax to strictest and assign each state to the most appropriate Likert bin
+
+```{r}
+#| label: add variables for graphing
+# add recessions
+df <- df |>
+  arrange(date) |>  # Order data by date
+  mutate(
+    # Add recession timing
+    dotcom = between(date, as_date("2001-03-01"), as_date("2001-11-01")),
+    greatrecession = between(date, as_date("2007-12-01"), as_date("2009-06-01")),
+    covid = between(date, as_date("2020-02-01"), as_date("2020-04-01")),
+    recession = dotcom | greatrecession | covid,
+    # Calculate underemployment as the gap between u6 and u3 enemployment measures
+    underemployment = u6 - u3,
+    # Calculate year-on-year inflation rate
+    inflation = (cpi - lag(cpi, 12)) / lag(cpi, 12) * 100,
+    # Add QE timing
+    qe = if_else(
+      date == as_date("2008-11-01") |
+        date == as_date("2010-11-01") |
+        date == as_date("2012-09-01") |
+        date == as_date("2020-03-01"),
+      inflation,
+      NA
+    )
+  )
+```
+
+## Graph data
+
+In this section, I produce graphs to check if inflation is in control and low unemployment was maintained for the last 25 years.
+
+### Plot both measures of unemployment with recessions.
+
+Create plot as a basis for other plots:
+
+```{r}
+#| label: Create a ggplot plotting recessions over time that will be the template for other graphs
+base_graph <- df |>
+  ggplot(aes(x = date)) +
+  # Shaded regions for recessions
+  geom_rect(
+    data = df |> filter(dotcom == TRUE),
+    aes(
+      xmin = date,
+      xmax = lead(date, default = last(date)),
+      ymin = -Inf,
+      ymax = Inf,
+      fill = "Recessions"  # Add label to gray boxes
+    )
+  ) +
+  geom_rect(
+    data = df |> filter(greatrecession == TRUE), aes(
+      xmin = date,
+      xmax = lead(date, default = last(date)),
+      ymin = -Inf,
+      ymax = Inf,
+      fill = "Recessions"  # Keep same label for consistency in legend
+    )
+  ) +
+  geom_rect(
+    data = df |> filter(covid == TRUE),
+    aes(
+      xmin = date,
+      xmax = lead(date, default = last(date)),
+      ymin = -Inf,
+      ymax = Inf,
+      fill = "Recessions"  # Keep same label for consistency in legend
+    )
+  ) +
+  scale_fill_manual(values = c("Recessions" = "grey"), name = "") +
+  # Adjust theme, colors, labels, and scale
+  theme_minimal() +
+  theme(panel.grid = element_blank(), legend.position = "bottom") +
+  scale_x_date(breaks = scales::pretty_breaks(n = 10),
+               date_labels = "%Y") +
+  labs(x = NULL) +
+  scale_y_continuous(labels = scales::percent)
+```
+
+Plot unemployment on the graph.
+
+```{r}
+#| label: plot unemp
+
+base_graph +
+  geom_line(aes(y = u6/100, color = "Unemployment, including underemployment")) +
+  geom_line(aes(y = u3/100, color = "Unemployment")) +
+  labs(y = NULL) +
+  scale_color_manual(
+    values = c(
+      "Unemployment" = "black",
+      "Unemployment, including underemployment" = "red"
+    ),
+    name = ""
+  ) 
+```
+
+I calculate a few stats I'd like to call out below:
+
+```{r}
+aug_2024_u3_count <- 7115*1000
+aug_2024_u3_perc <- df |> filter(date == as_date("2024-08-01")) |> select(u3)
+aug_2024_u6_perc <- df |> filter(date == as_date("2024-08-01")) |> select(u6)
+aug_2024_u6_count <- aug_2024_u3_count/aug_2024_u3_perc*aug_2024_u6_perc
+```
+
+### Plot underemployment
+
+Plot the gap between u3 and u6 unemployment: underemployment. This includes the underutilized part-time workers who would prefer to work full time, as well as individuals who are too discouraged to try to find work or who are only marginally attached to the labor market for a miscellany of other reasons.
+
+First, I calculate a few stats to call out in the presentation.
+
+```{r}
+#| label: get stats
+
+df |> select(underemployment, u6, u3) |> summary()
+df |> filter(recession == TRUE) |> select(underemployment, u6, u3) |> summary()
+
+multiplier_rec <- (mean(df[df$recession == TRUE, ]$u6) / mean(df[df$recession == TRUE, ]$u3))
+multiplier <- (mean(df$u6) / mean(df$u3))
+
+df |> filter(year(date) < 2008) |> select(underemployment) |> summary()
+
+covid_underemployment_min <- df |> filter(covid == TRUE) |> select(underemployment) |> min()
+covid_underemployment_max <- df |> filter(covid == TRUE) |> select(underemployment) |> max()
+covid_underemployment_spike <- covid_underemployment_max / covid_underemployment_min
+```
+
+Next, I plot underemployment over time.
+
+```{r}
+#| label: plot diff between types of unemployment over time
+
+base_graph +
+  # Line for underemployment
+  geom_line(aes(y = underemployment / 100, color = "Underemployment")) +
+  # Add dashed horizontal line with a label
+  geom_line(aes(y = 0.04, color = "Pre-crisis rate of underemployment = 4%"),
+            linetype = "dashed") +
+  labs(y = NULL) +
+  scale_color_manual(values = c("Underemployment" = "red"), name = "") +
+  scale_linetype_manual(
+    values = c("Pre-crisis rate of underemployment = 4%" = "dashed"),
+    name = ""
+  )
+```
+
+### Fed funds impact
+
+When did the Fed raise and lower interest rates?
+
+```{r}
+#| label: FED timeline
+#| warning: false
+
+base_graph +
+  geom_line(aes(y = fedfunds / 100, color = "red"),
+            size = .5,
+            show.legend = FALSE) +
+  labs(y = "Federal Funds Rate") +
+  theme(legend.position = "none")
+```
+
+### CPI data
+
+Here I try to show that inflation is caused by quantitative easing.
+
+```{r}
+#| label: graph QE and inflation.
+#| warning: false
+
+base_graph +
+  # Inflation line
+  geom_line(aes(y = inflation/100, color = "Inflation"), linewidth = 0.5) +
+  geom_point(aes(y = qe/100, color = "QE occurs"), size = 2) +
+  
+  # Labels and theme adjustments
+  labs(y = "Year-to-Year Inflation") +
+  
+  # Color and linetype manual scales for the legend
+  scale_color_manual(values = c("Inflation" = "red", "QE occurs" = "black"), name = "") +
+  scale_linetype_manual(values = c("Target inflation rate = 2%" = "dashed"), name = "") +
+  
+  # Customizing how the legend items are displayed
+  guides(
+    color = guide_legend(override.aes = list(
+      linetype = c("solid", "blank"),  # Solid line for Inflation, blank for QE
+      shape = c(NA, 16)  # No shape for Inflation, point shape for QE
+    )),
+    linetype = guide_legend(override.aes = list(size = 0.5))  # Dashed line for Target Inflation Rate
+  )
+```
