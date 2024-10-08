@@ -11,9 +11,10 @@ editor: visual
 library(tidyverse)
 library(janitor)
 library(jsonlite)
-## Install the required package with:
-## install.packages("RSocrata")
-library("RSocrata")
+library(RSocrata)
+library(readxl)
+library(maps)
+library(RColorBrewer)
 ```
 
 ## Intro
@@ -41,10 +42,7 @@ First, I get the firearm data, following instructions online: <https://dev.socra
 
 # API credentials
 base_url <- "https://data.cdc.gov/resource/489q-934x.json"
-#api_key_id <- "38ry4jgwz2h1qnzjsty0vxl6c"
-#api_key_secret <- "31isupy4vc48mlejhzzsjk97cxmingh0xog6aim7rrp78azfd7"
 app_token <- "sx3mlnOPJgxWbgMEi9vT6hg9I"
-#secret_token <- "qWL9VKXpdEMeVNR53WwiNZjewUBHGWMokCvh"
 spsmail <- "naomi.buell13@spsmail.cuny.edu"
 password <- "Mi6P&ZPQt3eCRKQ3"
 
@@ -68,7 +66,7 @@ Retrieve the data using the API and clean data frame. I elect to use quarterly a
 ```{r}
 #| label: read firearms deaths and clean
 
-df <- read.socrata(
+df_cdc <- read.socrata(
   composite_url,
   app_token = app_token,
   email     = spsmail,
@@ -77,8 +75,8 @@ df <- read.socrata(
   select(-c(time_period, cause_of_death, rate_type, unit)) |>
   pivot_longer(
     starts_with("rate"),
-    names_to = "rate",
-    values_to = "Deaths per 100,000",
+    names_to = "state",
+    values_to = "deaths",
     names_prefix = "rate_"
   ) |>
   clean_names() |>
@@ -86,206 +84,164 @@ df <- read.socrata(
                        patterns = c(year = "[0-9]+", " Q", quarter = "[0-9]+")) |> 
   mutate(year = year |> as.numeric(),
          quarter = quarter |>  as.numeric(),
-         deaths_per_100_000 = deaths_per_100_000 |> as.numeric()) |> 
+         deaths = deaths |> as.numeric(),
+         state = str_replace_all(state, "_", " ")) |> 
   drop_na() |> 
-  arrange(desc(year), desc(quarter), rate)
+  arrange(desc(year), desc(quarter), state)
 
-head(df)
+head(df_cdc)
 ```
 
 ## Import and categorize gun control laws
 
-Create a 5 point Likert scale categorizing gun control laws from most lax to strictest and assign each state to the most appropriate Likert bin
+I use data on the strictness of gun control laws from <https://giffords.org/lawcenter/resources/scorecard/>.
 
 ```{r}
-#| label: add variables for graphing
-# add recessions
-df <- df |>
-  arrange(date) |>  # Order data by date
-  mutate(
-    # Add recession timing
-    dotcom = between(date, as_date("2001-03-01"), as_date("2001-11-01")),
-    greatrecession = between(date, as_date("2007-12-01"), as_date("2009-06-01")),
-    covid = between(date, as_date("2020-02-01"), as_date("2020-04-01")),
-    recession = dotcom | greatrecession | covid,
-    # Calculate underemployment as the gap between u6 and u3 enemployment measures
-    underemployment = u6 - u3,
-    # Calculate year-on-year inflation rate
-    inflation = (cpi - lag(cpi, 12)) / lag(cpi, 12) * 100,
-    # Add QE timing
-    qe = if_else(
-      date == as_date("2008-11-01") |
-        date == as_date("2010-11-01") |
-        date == as_date("2012-09-01") |
-        date == as_date("2020-03-01"),
-      inflation,
-      NA
-    )
-  )
+#| label: import and clean gun control data
+#| warning: false
+
+gun_laws_path <- "https://raw.githubusercontent.com/naomibuell/DATA608/main/GiffordsScorecard.csv"
+df_gun_laws <- read_csv(gun_laws_path) |> 
+  clean_names() |> 
+  mutate(state = str_to_lower(state)) |> 
+  select(-starts_with("gun_death"))
+  
+head(df_gun_laws)
+```
+
+Then I merge the gun control data with the gun deaths data from the CDC.
+
+```{r}
+#| label: merge
+#| warning: false
+
+df_merged <- full_join(df_cdc, df_gun_laws)
+```
+
+Now that I have sourced all of my data, I create a 5 point Likert scale categorizing gun control laws from most lax to strictest and assign each state to the most appropriate Likert bin. The 5-point Likert scale will correspond with Giffords' grades of A, B, C, D, and F. I also do some final data type cleaning. I also add abbreviated state names.
+
+```{r}
+#| label: Likert
+
+df_likert <- df_merged |>
+  mutate(likert = substr(grade, 0, 1) |> # Adding likert scale
+           factor(levels = c("A", "B", "C", "D", "F")),
+         # Combining year and quarter as date) 
+         date = as.Date(paste0(year, "-", (quarter - 1) * 3 + 1, "-01")),
+         grade = as_factor(grade),
+         state = as_factor(state),
+         abbrev = state.abb[match(state, str_to_lower(state.name))] |> as_factor())
+
+head(df_likert)
 ```
 
 ## Graph data
 
-In this section, I produce graphs to check if inflation is in control and low unemployment was maintained for the last 25 years.
+In this section, I produce heat maps and other graphs to check if stricter gun control laws result in reduced gun violence deaths, using accessible colors.
 
-### Plot both measures of unemployment with recessions.
+### Heat maps
 
-Create plot as a basis for other plots:
+Firearm mortality by state:
 
 ```{r}
-#| label: Create a ggplot plotting recessions over time that will be the template for other graphs
-base_graph <- df |>
-  ggplot(aes(x = date)) +
-  # Shaded regions for recessions
-  geom_rect(
-    data = df |> filter(dotcom == TRUE),
-    aes(
-      xmin = date,
-      xmax = lead(date, default = last(date)),
-      ymin = -Inf,
-      ymax = Inf,
-      fill = "Recessions"  # Add label to gray boxes
-    )
-  ) +
-  geom_rect(
-    data = df |> filter(greatrecession == TRUE), aes(
-      xmin = date,
-      xmax = lead(date, default = last(date)),
-      ymin = -Inf,
-      ymax = Inf,
-      fill = "Recessions"  # Keep same label for consistency in legend
-    )
-  ) +
-  geom_rect(
-    data = df |> filter(covid == TRUE),
-    aes(
-      xmin = date,
-      xmax = lead(date, default = last(date)),
-      ymin = -Inf,
-      ymax = Inf,
-      fill = "Recessions"  # Keep same label for consistency in legend
-    )
-  ) +
-  scale_fill_manual(values = c("Recessions" = "grey"), name = "") +
-  # Adjust theme, colors, labels, and scale
+#| label: Firearm Mortality by State
+
+# Load map data
+us_map <- map_data("state")
+
+# Merge your data with the map data (make sure state names match and are lowercase)
+df_map <- us_map |> 
+  left_join(df_likert, by = c("region" = "state"))
+
+# Plot heat map
+ggplot(df_likert, aes(map_id = state, fill = deaths)) +
+  geom_map(color = "darkgrey", map = us_map, linewidth = .3) +
+  expand_limits(x = us_map$long, y = us_map$lat) +
+  scale_fill_distiller(palette = "RdYlBu",
+                       direction = -1) +  # Accessible palette
+  theme_void() +  # Remove gridlines and background
+  labs(fill = "Deaths per 100k")
+```
+
+Gun regulation score by state:
+
+```{r}
+#| label: Gun regulation score by state
+# Filter colorblind-friendly palettes
+brewer.pal.info[brewer.pal.info$colorblind == TRUE, ]
+
+# Plot the heat map using a discrete color scale
+df_likert |> 
+  drop_na(likert) |> 
+  ggplot(aes(map_id = state, fill = likert)) +
+  geom_map(map = us_map, color = "white", linewidth = .3) +
+  expand_limits(x = us_map$long, y = us_map$lat) +
+  scale_fill_brewer(palette = "RdYlBu", direction = -1) +
+  theme_void() +  # Removes gridlines and background
+  labs(fill = "Gun regulation grade")
+```
+
+### Scatter plot
+
+```{r}
+#| label: scatter plot
+#| warning: false
+
+# Plot points and trendline
+df_likert |>
+  # Choose only the latest quarters' data
+  filter(year == max(year), quarter == max(quarter)) |>
+  ggplot(aes(y = deaths)) +
+  # Scatter
+  geom_jitter(aes(x = gun_law_strength_ranked)) +
+  # Trendline
+  geom_smooth(aes(x = gun_law_strength_ranked),
+              method = "lm",
+              se = F) +
+  # Theme adjustments
   theme_minimal() +
-  theme(panel.grid = element_blank(), legend.position = "bottom") +
-  scale_x_date(breaks = scales::pretty_breaks(n = 10),
-               date_labels = "%Y") +
-  labs(x = NULL) +
-  scale_y_continuous(labels = scales::percent)
+  theme(panel.grid = element_blank()) +
+  labs(y = "Deaths per 100k", x = "States ranked from most regulated to least regulated")
+
+# Plot bars and trendline
+df_likert |>
+  # Choose only the latest quarter's data
+  filter(year == max(year), quarter == max(quarter)) |>
+  drop_na() |>
+  ggplot(aes(y = deaths)) +
+  # Bar chart
+  geom_col(aes(x = fct_reorder(abbrev, gun_law_strength_ranked)), fill = brewer.pal(9, "RdYlBu")[3]) +
+  # Trendline
+  geom_smooth(
+    aes(x = gun_law_strength_ranked),
+    method = "lm",
+    se = F,
+    color = brewer.pal(9, "RdYlBu")[1]
+  ) +
+  # Theme adjustments
+  theme_minimal() +
+  theme(panel.grid = element_blank()) +
+  labs(y = "Deaths per 100k", x = "States, ranked from most regulated to least regulated") +
+  scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 49)])  # Show every 5th state label
+
+
+# Model number of deaths from state gun law ranking
+lm(deaths * 100000 ~ gun_law_strength_ranked, data = df_likert) |> summary()
+# Model 100k deaths from state grade
+lm(deaths * 100000 ~ likert, data = df_likert) |> summary()
 ```
 
-Plot unemployment on the graph.
+For every rank you go down on the list of most regulated to least regulated states in terms of gun control laws, your state's death rate increases by 30,333 per year. A perfect grade is associated with 959,659 gun deaths per year at baseline. A B adds an additional 305,497 deaths on top of that, a C would've added 760,653 deaths, a D would add 542,841, and an F would create an additional 1,040,996 deaths. (All statistically significant based on linear regression).
+
+### Bar chart
 
 ```{r}
-#| label: plot unemp
-
-base_graph +
-  geom_line(aes(y = u6/100, color = "Unemployment, including underemployment")) +
-  geom_line(aes(y = u3/100, color = "Unemployment")) +
-  labs(y = NULL) +
-  scale_color_manual(
-    values = c(
-      "Unemployment" = "black",
-      "Unemployment, including underemployment" = "red"
-    ),
-    name = ""
-  ) 
-```
-
-I calculate a few stats I'd like to call out below:
-
-```{r}
-aug_2024_u3_count <- 7115*1000
-aug_2024_u3_perc <- df |> filter(date == as_date("2024-08-01")) |> select(u3)
-aug_2024_u6_perc <- df |> filter(date == as_date("2024-08-01")) |> select(u6)
-aug_2024_u6_count <- aug_2024_u3_count/aug_2024_u3_perc*aug_2024_u6_perc
-```
-
-### Plot underemployment
-
-Plot the gap between u3 and u6 unemployment: underemployment. This includes the underutilized part-time workers who would prefer to work full time, as well as individuals who are too discouraged to try to find work or who are only marginally attached to the labor market for a miscellany of other reasons.
-
-First, I calculate a few stats to call out in the presentation.
-
-```{r}
-#| label: get stats
-
-df |> select(underemployment, u6, u3) |> summary()
-df |> filter(recession == TRUE) |> select(underemployment, u6, u3) |> summary()
-
-multiplier_rec <- (mean(df[df$recession == TRUE, ]$u6) / mean(df[df$recession == TRUE, ]$u3))
-multiplier <- (mean(df$u6) / mean(df$u3))
-
-df |> filter(year(date) < 2008) |> select(underemployment) |> summary()
-
-covid_underemployment_min <- df |> filter(covid == TRUE) |> select(underemployment) |> min()
-covid_underemployment_max <- df |> filter(covid == TRUE) |> select(underemployment) |> max()
-covid_underemployment_spike <- covid_underemployment_max / covid_underemployment_min
-```
-
-Next, I plot underemployment over time.
-
-```{r}
-#| label: plot diff between types of unemployment over time
-
-base_graph +
-  # Line for underemployment
-  geom_line(aes(y = underemployment / 100, color = "Underemployment")) +
-  # Add dashed horizontal line with a label
-  geom_line(aes(y = 0.04, color = "Pre-crisis rate of underemployment = 4%"),
-            linetype = "dashed") +
-  labs(y = NULL) +
-  scale_color_manual(values = c("Underemployment" = "red"), name = "") +
-  scale_linetype_manual(
-    values = c("Pre-crisis rate of underemployment = 4%" = "dashed"),
-    name = ""
-  )
-```
-
-### Fed funds impact
-
-When did the Fed raise and lower interest rates?
-
-```{r}
-#| label: FED timeline
-#| warning: false
-
-base_graph +
-  geom_line(aes(y = fedfunds / 100, color = "red"),
-            size = .5,
-            show.legend = FALSE) +
-  labs(y = "Federal Funds Rate") +
-  theme(legend.position = "none")
-```
-
-### CPI data
-
-Here I try to show that inflation is caused by quantitative easing.
-
-```{r}
-#| label: graph QE and inflation.
-#| warning: false
-
-base_graph +
-  # Inflation line
-  geom_line(aes(y = inflation/100, color = "Inflation"), linewidth = 0.5) +
-  geom_point(aes(y = qe/100, color = "QE occurs"), size = 2) +
-  
-  # Labels and theme adjustments
-  labs(y = "Year-to-Year Inflation") +
-  
-  # Color and linetype manual scales for the legend
-  scale_color_manual(values = c("Inflation" = "red", "QE occurs" = "black"), name = "") +
-  scale_linetype_manual(values = c("Target inflation rate = 2%" = "dashed"), name = "") +
-  
-  # Customizing how the legend items are displayed
-  guides(
-    color = guide_legend(override.aes = list(
-      linetype = c("solid", "blank"),  # Solid line for Inflation, blank for QE
-      shape = c(NA, 16)  # No shape for Inflation, point shape for QE
-    )),
-    linetype = guide_legend(override.aes = list(size = 0.5))  # Dashed line for Target Inflation Rate
-  )
+#| label: boxplot
+df_likert |> 
+  drop_na() |> 
+  ggplot(aes(x = likert, y = deaths)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(panel.grid = element_blank()) +
+  labs(x = "Strength of gun regulation", y = "Deaths per 100,000")
 ```
