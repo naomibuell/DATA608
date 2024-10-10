@@ -163,6 +163,37 @@ ggplot(df_likert, aes(map_id = state, fill = deaths)) +
   labs(fill = "Deaths per 100k")
 ```
 
+Quintiles of deaths per 100k:
+
+```{r}
+#| label: plotting heatmap of deaths by quintile
+
+df_quint <- df_likert |>
+  drop_na(likert) |>
+  filter(year == max(year), quarter == max(quarter)) |>
+  mutate(
+    quint = ntile(deaths, 5),
+    # Create labels for each quintile with min/max deaths
+    quint_label = factor(
+      quint,
+      levels = 1:5,
+      labels = sapply(1:5, function(i) {
+        min_max <- range(deaths[ntile(deaths, 5) == i])
+        paste0(min_max[1], " - ", min_max[2], "")
+      })
+    )
+  )
+
+df_quint |> 
+  ggplot(aes(map_id = state, fill = quint_label)) +
+  geom_map(map = us_map, color = "gray", linewidth = .3) +
+  expand_limits(x = us_map$long, y = us_map$lat) +
+  scale_fill_brewer(palette = "RdYlBu", direction = -1) +
+  theme_void() +  # Removes gridlines and background
+  labs(fill = "Deaths per 100k")
+
+```
+
 Gun regulation score by state:
 
 ```{r}
@@ -207,19 +238,16 @@ df_likert |>
   theme(panel.grid = element_blank()) +
   labs(y = "Deaths per 100k", x = "States, ranked from most regulated to least regulated") +
   scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 49)])  # Show every 5th state label
-
-
-
 ```
 
 ```{r}
 #| label: stats to call out
 
-# Model number of deaths from state gun law ranking
-lm_ranking <- lm(deaths * 100000 ~ gun_law_strength_ranked, data = df_likert) 
+# Model number of deaths per 100k from state gun law ranking
+lm_ranking <- lm(deaths ~ gun_law_strength_ranked, data = df_likert) 
 lm_ranking |> summary()
-# Model 100k deaths from state grade
-lm_likert <- lm(deaths * 100000 ~ likert, data = df_likert) 
+# Model number of deaths per 100k from state grade
+lm_likert <- lm(deaths ~ likert, data = df_likert) 
 lm_likert |> summary()
 
 df_likert |>
@@ -230,4 +258,4 @@ df_likert |>
   head(50)
 ```
 
-For every rank you go down on the list of most regulated to least regulated states in terms of gun control laws, your state's death rate increases by 30,333 per year. A perfect grade is associated with 959,659 gun deaths per year at baseline. A B adds an additional 305,497 deaths on top of that, a C would've added 760,653 deaths, a D would add 542,841, and an F would create an additional 1,040,996 deaths. (All statistically significant based on linear regression). We can predict 43.99% of variance in gun deaths using gun law grading, and 47.24% of variance in gun deaths using gun law ranking.
+For every rank you go down on the list of most regulated to least regulated states in terms of gun control laws, your state's death rate increases by .3 deaths per 100k per year. A perfect grade is associated with 9.6 gun deaths per 100k per year at baseline. A B adds an additional 3 deaths per 100k on top of that, a C would've added 7.6 deaths per 100k, a D would add 5.4 per 100k, and an F would create an additional 10.4 deaths per 100k. (All statistically significant based on linear regression). We can predict 43.99% of variance in gun deaths using gun law grading, and 47.24% of variance in gun deaths using gun law ranking.
