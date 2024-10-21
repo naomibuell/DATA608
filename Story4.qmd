@@ -29,22 +29,33 @@ My analysis and data visualizations address the variation in average salary for 
 Here, I download salary data from BLS. I get salary data by state on [data scientists](https://www.bls.gov/ooh/math/data-scientists.htm), which include data analytics specialists, data mining analysts, data visualization developers, and business intelligence developers. I also pull data on [database administrators and architects](https://www.bls.gov/ooh/computer-and-information-technology/database-administrators.htm), which include automatic data processing planners, data architects, database administration managers, database coordinators, database developers, database programmers, database security administrators, data integration specialists, data warehousing specialists, and automatic data processing planners.
 
 ```{r}
+payload <- list(
+      "seriesid" = "NWU37167402020000151061",
+      "startyear" = 2023,
+      "endyear" = 2023,
+      "registrationkey" = registrationkey
+    )
+response <- fromJSON(blsAPI(payload))
+```
+
+```{r}
 #| label: set up BLS API
 #| error: true
 #| message: false
 #| warning: false
 #| results: hide
 
-registrationkey <- "43428968c34741fab188f98db57ba119"
+# registrationkey <- "43428968c34741fab188f98db57ba119"
+registrationkey <- "4a2d974fa90e43f7a80ac58413209058" #2nd key
 
 base_url <- "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 
 state_codes <- sprintf("%02d", c(1:56)) # Generate state codes for all states
 state_codes <- state_codes[state_codes != "52"] # Remove the skipped state code 52 (which does not exist)
 
-job_codes <- c("152051", # Data scientists
-               "151243", # Database architects
-               "151242") # Database Administrators
+job_codes <- c("152051") #, # Data scientists
+#"151243", # Database architects
+#"151242") # Database Administrators
 
 # Prepare empty lists to store the payloads and responses
 payload_list <- list()
@@ -52,15 +63,14 @@ response_list <- list()
 
 # Loop through state and job codes and pull data w/ API
 for (state_code in state_codes) {
+  # 52 codes
   for (job_code in job_codes) {
-    series_id <- paste0("OEU", 
-                           state_code, 
-                           "000000", 
-                           job_code)
+    # 3 codes
+    series_id <- paste0("OEU", state_code, "000000", job_code)
     
     payload_list[[state_code]][[job_code]] <- list(
       "seriesid" = series_id,
-      "startyear" = 2023,
+      "startyear" = 20,
       "endyear" = 2023,
       "registrationkey" = registrationkey
     )
