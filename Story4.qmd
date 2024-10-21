@@ -1,0 +1,229 @@
+---
+title: "Story 4: How much do we get paid?"
+author: "Naomi Buell"
+format: pptx
+editor: visual
+---
+
+```{r}
+#| label: load packages
+#| message: false
+library(tidyverse)
+library(janitor)
+library(jsonlite)
+# Per instructions: https://www.bls.gov/developers/api_r.htm
+# library(devtools)
+# install_github("mikeasilva/blsAPI")
+library(blsAPI)
+library(maps)
+```
+
+## Intro
+
+For this story we will answer the question, "How much do we get paid?"
+
+My analysis and data visualizations address the variation in average salary for "Data Practitioners" based on role descriptor and state. The term "Data Practitioner" is a generic job descriptor which includes many different job role titles for individuals whose work activities overlap including Data Scientist, Data Engineer, Data Analyst, Business Analyst, Data Architect, etc.
+
+## Get data from the Bureau of Labor Statistics (BLS) API
+
+Here, I download salary data from BLS. I get salary data by state on [data scientists](https://www.bls.gov/ooh/math/data-scientists.htm), which include data analytics specialists, data mining analysts, data visualization developers, and business intelligence developers. I also pull data on [database administrators and architects](https://www.bls.gov/ooh/computer-and-information-technology/database-administrators.htm), which include automatic data processing planners, data architects, database administration managers, database coordinators, database developers, database programmers, database security administrators, data integration specialists, data warehousing specialists, and automatic data processing planners.
+
+```{r}
+#| label: set up BLS API
+#| error: true
+#| message: false
+#| warning: false
+#| results: hide
+
+registrationkey <- "43428968c34741fab188f98db57ba119"
+
+base_url <- "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+
+state_codes <- sprintf("%02d", c(1:56)) # Generate state codes for all states
+state_codes <- state_codes[state_codes != "52"] # Remove the skipped state code 52 (which does not exist)
+
+job_codes <- c("152051", # Data scientists
+               "151243", # Database architects
+               "151242") # Database Administrators
+
+# Prepare empty lists to store the payloads and responses
+payload_list <- list()
+response_list <- list()
+
+# Loop through state and job codes and pull data w/ API
+for (state_code in state_codes) {
+  for (job_code in job_codes) {
+    series_id <- paste0("OEU", 
+                           state_code, 
+                           "000000", 
+                           job_code)
+    
+    payload_list[[state_code]][[job_code]] <- list(
+      "seriesid" = series_id,
+      "startyear" = 2023,
+      "endyear" = 2023,
+      "registrationkey" = registrationkey
+    )
+    
+    # Query the API using blsAPI and store the response as raw JSON
+    response_list[[state_code]][[job_code]] <- fromJSON(blsAPI(payload_list[[state_code]][[job_code]]))[["Results"]][["series"]][["data"]]
+    
+    # Add a delay to avoid hitting the API rate limit
+    Sys.sleep(0.5)  # Wait half a second between requests
+  }
+}
+```
+
+I bind data together from multiple pulls.
+
+```{r}
+#| label: bind and clean data
+
+# Combine 1st and 2nd retrievals for both series, removing overlap, and cleaning vars. 
+cpi <- bind_rows(response_list[[1]][[1]], response_list[[2]][[1]]) |>
+  unique() |>
+  rename(cpi = value)
+
+u3 <- bind_rows(response_list[[1]][[2]], response_list[[2]][[2]]) |>
+  unique() |>
+  rename(u3 = value)
+
+u6 <- bind_rows(response_list[[1]][[3]], response_list[[2]][[3]]) |>
+  unique() |>
+  rename(u6 = value)
+
+bls <- full_join(cpi, u3) |> 
+  full_join(u6) |> 
+  clean_names() |>
+  mutate(
+    period = substr(period, 2, 3) |> as.integer(),
+    year = year |> as.integer(),
+    cpi = cpi |> as.numeric(),
+    u3 = u3 |> as.numeric(),
+    u6 = u6 |> as.numeric()
+  ) |>
+  select(-c(latest, footnotes))
+
+head(bls)
+```
+
+## Graph data
+
+In my visualization(s) below, I show the most salient information (variation in average salary by role and by state).
+
+```{r}
+#| label: Firearm Mortality by State
+
+# Load map data
+us_map <- map_data("state")
+
+# Merge your data with the map data (make sure state names match and are lowercase)
+df_map <- us_map |> 
+  left_join(df_likert, by = c("region" = "state"))
+
+# Plot heat map
+ggplot(df_likert, aes(map_id = state, fill = deaths)) +
+  geom_map(color = "darkgrey", map = us_map, linewidth = .3) +
+  expand_limits(x = us_map$long, y = us_map$lat) +
+  scale_fill_distiller(palette = "RdYlBu",
+                       direction = -1) +  # Accessible palette
+  theme_void() +  # Remove gridlines and background
+  labs(fill = "Deaths per 100k")
+```
+
+Quintiles of deaths per 100k:
+
+```{r}
+#| label: plotting heatmap of deaths by quintile
+
+df_quint <- df_likert |>
+  drop_na(likert) |>
+  filter(year == max(year), quarter == max(quarter)) |>
+  mutate(
+    quint = ntile(deaths, 5),
+    # Create labels for each quintile with min/max deaths
+    quint_label = factor(
+      quint,
+      levels = 1:5,
+      labels = sapply(1:5, function(i) {
+        min_max <- range(deaths[ntile(deaths, 5) == i])
+        paste0(min_max[1], " - ", min_max[2], "")
+      })
+    )
+  )
+
+df_quint |> 
+  ggplot(aes(map_id = state, fill = quint_label)) +
+  geom_map(map = us_map, color = "gray", linewidth = .3) +
+  expand_limits(x = us_map$long, y = us_map$lat) +
+  scale_fill_brewer(palette = "RdYlBu", direction = -1) +
+  theme_void() +  # Removes gridlines and background
+  labs(fill = "Deaths per 100k")
+
+```
+
+Gun regulation score by state:
+
+```{r}
+#| label: Gun regulation score by state
+# Filter colorblind-friendly palettes
+brewer.pal.info[brewer.pal.info$colorblind == TRUE, ]
+
+# Plot the heat map using a discrete color scale
+df_likert |> 
+  drop_na(likert) |> 
+  ggplot(aes(map_id = state, fill = likert)) +
+  geom_map(map = us_map, color = "gray", linewidth = .3) +
+  expand_limits(x = us_map$long, y = us_map$lat) +
+  scale_fill_brewer(palette = "RdYlBu", direction = -1) +
+  theme_void() +  # Removes gridlines and background
+  labs(fill = "Gun regulation grade")
+```
+
+### Bar chart with trendline
+
+```{r}
+#| label: scatter plot
+#| warning: false
+
+# Plot bars and trendline
+df_likert |>
+  # Choose only the latest quarter's data
+  filter(year == max(year), quarter == max(quarter)) |>
+  drop_na() |>
+  ggplot(aes(y = deaths)) +
+  # Bar chart
+  geom_col(aes(x = fct_reorder(abbrev, gun_law_strength_ranked)), fill = brewer.pal(9, "RdYlBu")[3]) +
+  # Trendline
+  geom_smooth(
+    aes(x = gun_law_strength_ranked),
+    method = "lm",
+    se = F,
+    color = brewer.pal(9, "RdYlBu")[1]
+  ) +
+  # Theme adjustments
+  theme_minimal() +
+  theme(panel.grid = element_blank()) +
+  labs(y = "Deaths per 100k", x = "States, ranked from most regulated to least regulated") +
+  scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 49)])  # Show every 5th state label
+```
+
+```{r}
+#| label: stats to call out
+
+# Model number of deaths per 100k from state gun law ranking
+lm_ranking <- lm(deaths ~ gun_law_strength_ranked, data = df_likert) 
+lm_ranking |> summary()
+# Model number of deaths per 100k from state grade
+lm_likert <- lm(deaths ~ likert, data = df_likert) 
+lm_likert |> summary()
+
+df_likert |>
+  # Choose only the latest quarter's data
+  filter(year == max(year), quarter == max(quarter)) |>
+  drop_na() |>
+  arrange(desc(deaths)) |> 
+  head(50)
+```
+
+For every rank you go down on the list of most regulated to least regulated states in terms of gun control laws, your state's death rate increases by .3 deaths per 100k per year. A perfect grade is associated with 9.6 gun deaths per 100k per year at baseline. A B adds an additional 3 deaths per 100k on top of that, a C would've added 7.6 deaths per 100k, a D would add 5.4 per 100k, and an F would create an additional 10.4 deaths per 100k. (All statistically significant based on linear regression). We can predict 43.99% of variance in gun deaths using gun law grading, and 47.24% of variance in gun deaths using gun law ranking.
