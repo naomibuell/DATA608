@@ -11,11 +11,7 @@ editor: visual
 library(tidyverse)
 library(janitor)
 library(jsonlite)
-# Per instructions: https://www.bls.gov/developers/api_r.htm
-# library(devtools)
-# install_github("mikeasilva/blsAPI")
-library(blsAPI)
-library(maps)
+library(httr2)
 ```
 
 ## Intro
@@ -24,97 +20,115 @@ For this story we will answer the question, "How much do we get paid?"
 
 My analysis and data visualizations address the variation in average salary for "Data Practitioners" based on role descriptor and state. The term "Data Practitioner" is a generic job descriptor which includes many different job role titles for individuals whose work activities overlap including Data Scientist, Data Engineer, Data Analyst, Business Analyst, Data Architect, etc.
 
-## Get data from the Bureau of Labor Statistics (BLS) API
+## Get data from the Bureau of Labor Statistics (BLS) through the CareerOneStop API
 
-Here, I download salary data from BLS. I get salary data by state on [data scientists](https://www.bls.gov/ooh/math/data-scientists.htm), which include data analytics specialists, data mining analysts, data visualization developers, and business intelligence developers. I also pull data on [database administrators and architects](https://www.bls.gov/ooh/computer-and-information-technology/database-administrators.htm), which include automatic data processing planners, data architects, database administration managers, database coordinators, database developers, database programmers, database security administrators, data integration specialists, data warehousing specialists, and automatic data processing planners.
-
-```{r}
-payload <- list(
-      "seriesid" = "NWU37167402020000151061",
-      "startyear" = 2023,
-      "endyear" = 2023,
-      "registrationkey" = registrationkey
-    )
-response <- fromJSON(blsAPI(payload))
-```
+Here, I download salary data from BLS Occupational Employment and Wages Statistics (OEWS) using the [CareerOneStop.org API](https://www.careeronestop.org/Developers/WebAPI/technical-information.aspx). I get salary data by state on [data scientists](https://www.bls.gov/ooh/math/data-scientists.htm), which include data analytics specialists, data mining analysts, data visualization developers, and business intelligence developers. I also pull data on [database administrators and architects](https://www.bls.gov/ooh/computer-and-information-technology/database-administrators.htm), which include automatic data processing planners, data architects, database administration managers, database coordinators, database developers, database programmers, database security administrators, data integration specialists, data warehousing specialists, and automatic data processing planners. Data is from May 2023.
 
 ```{r}
-#| label: set up BLS API
+#| label: Pull data w/ CareerOneStop API
 #| error: true
 #| message: false
 #| warning: false
 #| results: hide
 
-# registrationkey <- "43428968c34741fab188f98db57ba119"
-registrationkey <- "4a2d974fa90e43f7a80ac58413209058" #2nd key
-
+# API credentials
+api_token <- "yewsVIARypHPbfHNt0GchJsjUeX3dbkJArnwCuvaUKklKZEssGpl9NuLO4jIeGJng+Q8raXwGDrcag6UsfDtlA=="
+userid <- "1K9fclpWIkgV5X8"
 base_url <- "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+locations <- state.abb
+keywords <- c("152051", # Data scientists
+              "151243", # Database architects
+              "151242") # Database Administrators
 
-state_codes <- sprintf("%02d", c(1:56)) # Generate state codes for all states
-state_codes <- state_codes[state_codes != "52"] # Remove the skipped state code 52 (which does not exist)
-
-job_codes <- c("152051") #, # Data scientists
-#"151243", # Database architects
-#"151242") # Database Administrators
-
-# Prepare empty lists to store the payloads and responses
-payload_list <- list()
-response_list <- list()
+# Initialize list and df for storage in the proceeding loop
+data <- list()
 
 # Loop through state and job codes and pull data w/ API
-for (state_code in state_codes) {
-  # 52 codes
-  for (job_code in job_codes) {
-    # 3 codes
-    series_id <- paste0("OEU", state_code, "000000", job_code)
-    
-    payload_list[[state_code]][[job_code]] <- list(
-      "seriesid" = series_id,
-      "startyear" = 20,
-      "endyear" = 2023,
-      "registrationkey" = registrationkey
+for (location in locations) {
+  for (keyword in keywords) {
+    request_url <- paste0(
+      "https://api.careeronestop.org/v1/comparesalaries/",
+      userid,
+      "/wage?keyword=",
+      keyword,
+      "&location=",
+      location,
+      "&enableMetaData=false"
     )
     
-    # Query the API using blsAPI and store the response as raw JSON
-    response_list[[state_code]][[job_code]] <- fromJSON(blsAPI(payload_list[[state_code]][[job_code]]))[["Results"]][["series"]][["data"]]
+    response <- request(request_url) |>
+      req_method("GET") |>
+      req_headers("Content-Type" = "application/json",
+                  "Authorization" = paste("Bearer", api_token)) |>
+      req_url_query(keyword = keyword,
+                    location = location,
+                    enableMetaData = F) |>
+      req_perform()  # Send the request
+    
+    # Parse the JSON response
+    data[[location]][[keyword]] <- response |> resp_body_json()
     
     # Add a delay to avoid hitting the API rate limit
-    Sys.sleep(0.5)  # Wait half a second between requests
+    Sys.sleep(0.4)
   }
 }
 ```
 
-I bind data together from multiple pulls.
+I bind data together, keeping only variables of interest.
 
 ```{r}
 #| label: bind and clean data
 
-# Combine 1st and 2nd retrievals for both series, removing overlap, and cleaning vars. 
-cpi <- bind_rows(response_list[[1]][[1]], response_list[[2]][[1]]) |>
-  unique() |>
-  rename(cpi = value)
+results <- tibble()
 
-u3 <- bind_rows(response_list[[1]][[2]], response_list[[2]][[2]]) |>
-  unique() |>
-  rename(u3 = value)
+for (location in locations) {
+  for (keyword in keywords) {
+      title <- data[[location]][[keyword]][["OccupationDetail"]][["OccupationTitle"]]
+      wages_list <- data[[location]][[keyword]][["OccupationDetail"]][["Wages"]][["StateWagesList"]]
+      
+      # Create a data frame from the StateWagesList
+      wage_df <- do.call(rbind, lapply(wages_list, function(wage) {
+        data.frame(
+          median = wage[["Median"]],
+          rate_type = wage[["RateType"]],
+          pct_10 = wage[["Pct10"]],
+          pct_25 = wage[["Pct25"]],
+          pct_75 = wage[["Pct75"]],
+          pct_90 = wage[["Pct90"]],
+          stringsAsFactors = F
+        )
+      }))
+      
+      # Add the state and occupation title to the wage_df
+      wage_df$state <- location
+      wage_df$occupation_title <- title
+      
+      # Append to results data frame
+      results <- rbind(results, wage_df)
+  }
+}
+```
 
-u6 <- bind_rows(response_list[[1]][[3]], response_list[[2]][[3]]) |>
-  unique() |>
-  rename(u6 = value)
+I clean and tidy the resulting dataset below.
 
-bls <- full_join(cpi, u3) |> 
-  full_join(u6) |> 
-  clean_names() |>
+```{r}
+#| label: clean df
+
+results_clean <- results |> 
   mutate(
-    period = substr(period, 2, 3) |> as.integer(),
-    year = year |> as.integer(),
-    cpi = cpi |> as.numeric(),
-    u3 = u3 |> as.numeric(),
-    u6 = u6 |> as.numeric()
-  ) |>
-  select(-c(latest, footnotes))
+    state = as_factor(state),
+    occupation_title = as_factor(occupation_title),
+    median = as.numeric(median),
+    pct_10 = as.numeric(pct_10),
+    pct_25 = as.numeric(pct_25),
+    pct_75 = as.numeric(pct_75),
+    pct_90 = as.numeric(pct_90)
+  ) |> 
+  clean_names() |> 
+  select(state, occupation_title, rate_type, median, starts_with("pct")) |> 
+  arrange(state, desc(median))
 
-head(bls)
+head(results_clean)
 ```
 
 ## Graph data
@@ -122,118 +136,107 @@ head(bls)
 In my visualization(s) below, I show the most salient information (variation in average salary by role and by state).
 
 ```{r}
-#| label: Firearm Mortality by State
+#| label: Create a boxplot using summary statistics, facet wrap by occupation
 
-# Load map data
-us_map <- map_data("state")
-
-# Merge your data with the map data (make sure state names match and are lowercase)
-df_map <- us_map |> 
-  left_join(df_likert, by = c("region" = "state"))
-
-# Plot heat map
-ggplot(df_likert, aes(map_id = state, fill = deaths)) +
-  geom_map(color = "darkgrey", map = us_map, linewidth = .3) +
-  expand_limits(x = us_map$long, y = us_map$lat) +
-  scale_fill_distiller(palette = "RdYlBu",
-                       direction = -1) +  # Accessible palette
-  theme_void() +  # Remove gridlines and background
-  labs(fill = "Deaths per 100k")
-```
-
-Quintiles of deaths per 100k:
-
-```{r}
-#| label: plotting heatmap of deaths by quintile
-
-df_quint <- df_likert |>
-  drop_na(likert) |>
-  filter(year == max(year), quarter == max(quarter)) |>
-  mutate(
-    quint = ntile(deaths, 5),
-    # Create labels for each quintile with min/max deaths
-    quint_label = factor(
-      quint,
-      levels = 1:5,
-      labels = sapply(1:5, function(i) {
-        min_max <- range(deaths[ntile(deaths, 5) == i])
-        paste0(min_max[1], " - ", min_max[2], "")
-      })
-    )
-  )
-
-df_quint |> 
-  ggplot(aes(map_id = state, fill = quint_label)) +
-  geom_map(map = us_map, color = "gray", linewidth = .3) +
-  expand_limits(x = us_map$long, y = us_map$lat) +
-  scale_fill_brewer(palette = "RdYlBu", direction = -1) +
-  theme_void() +  # Removes gridlines and background
-  labs(fill = "Deaths per 100k")
-
-```
-
-Gun regulation score by state:
-
-```{r}
-#| label: Gun regulation score by state
-# Filter colorblind-friendly palettes
-brewer.pal.info[brewer.pal.info$colorblind == TRUE, ]
-
-# Plot the heat map using a discrete color scale
-df_likert |> 
-  drop_na(likert) |> 
-  ggplot(aes(map_id = state, fill = likert)) +
-  geom_map(map = us_map, color = "gray", linewidth = .3) +
-  expand_limits(x = us_map$long, y = us_map$lat) +
-  scale_fill_brewer(palette = "RdYlBu", direction = -1) +
-  theme_void() +  # Removes gridlines and background
-  labs(fill = "Gun regulation grade")
-```
-
-### Bar chart with trendline
-
-```{r}
-#| label: scatter plot
-#| warning: false
-
-# Plot bars and trendline
-df_likert |>
-  # Choose only the latest quarter's data
-  filter(year == max(year), quarter == max(quarter)) |>
-  drop_na() |>
-  ggplot(aes(y = deaths)) +
-  # Bar chart
-  geom_col(aes(x = fct_reorder(abbrev, gun_law_strength_ranked)), fill = brewer.pal(9, "RdYlBu")[3]) +
-  # Trendline
-  geom_smooth(
-    aes(x = gun_law_strength_ranked),
-    method = "lm",
-    se = F,
-    color = brewer.pal(9, "RdYlBu")[1]
-  ) +
-  # Theme adjustments
+results_clean |>
+  filter(rate_type == "Annual") |>
+  ggplot(aes(x = reorder(state, median))) +
+  geom_boxplot(aes(
+    ymin = pct_10,
+    lower = pct_25,
+    middle = median,
+    upper = pct_75,
+    ymax = pct_90
+  ),
+  stat = "identity") +
+  facet_wrap( ~ occupation_title, scales = "free_y") +  
+  # Edit theme and formatting
   theme_minimal() +
-  theme(panel.grid = element_blank()) +
-  labs(y = "Deaths per 100k", x = "States, ranked from most regulated to least regulated") +
-  scale_x_discrete(breaks = function(x) x[seq(1, length(x), by = 49)])  # Show every 5th state label
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  coord_flip()
 ```
 
 ```{r}
-#| label: stats to call out
+#| label: box plots, color
 
-# Model number of deaths per 100k from state gun law ranking
-lm_ranking <- lm(deaths ~ gun_law_strength_ranked, data = df_likert) 
-lm_ranking |> summary()
-# Model number of deaths per 100k from state grade
-lm_likert <- lm(deaths ~ likert, data = df_likert) 
-lm_likert |> summary()
-
-df_likert |>
-  # Choose only the latest quarter's data
-  filter(year == max(year), quarter == max(quarter)) |>
-  drop_na() |>
-  arrange(desc(deaths)) |> 
-  head(50)
+results_clean |>
+  filter(rate_type == "Annual") |>
+  group_by(state) |> 
+  ggplot(aes(x = reorder(state, median), color = occupation_title)) +  # Different colors for each occupation
+  geom_boxplot(
+    aes(
+      ymin = pct_10,
+      lower = pct_25,
+      middle = median,
+      upper = pct_75,
+      ymax = pct_90
+    ),
+    stat = "identity"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  coord_flip()
 ```
 
-For every rank you go down on the list of most regulated to least regulated states in terms of gun control laws, your state's death rate increases by .3 deaths per 100k per year. A perfect grade is associated with 9.6 gun deaths per 100k per year at baseline. A B adds an additional 3 deaths per 100k on top of that, a C would've added 7.6 deaths per 100k, a D would add 5.4 per 100k, and an F would create an additional 10.4 deaths per 100k. (All statistically significant based on linear regression). We can predict 43.99% of variance in gun deaths using gun law grading, and 47.24% of variance in gun deaths using gun law ranking.
+```{r}
+#| label: box plots, color and facet wrap
+
+results_clean |>
+  filter(rate_type == "Annual") |>
+  group_by(state) |> 
+  ggplot(aes(x = reorder(state, median), color = occupation_title)) +  # Different colors for each occupation
+  geom_boxplot(
+    aes(
+      ymin = pct_10,
+      lower = pct_25,
+      middle = median,
+      upper = pct_75,
+      ymax = pct_90
+    ), stat = "identity"
+  ) +
+  facet_wrap(~ occupation_title, scales = "free_y") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  coord_flip()
+```
+
+```{r}
+#| label: box plots by state
+
+# Create the boxplot
+results_clean |> 
+  filter(rate_type == "Annual") |> 
+  pivot_longer(cols = c(median, starts_with("p"))) |> 
+  ggplot(aes(x = value, y = reorder(state, value))) +
+  geom_boxplot() +
+  theme_minimal() +
+    theme(panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank())  # Remove minor gridlines
+```
+
+```{r}
+#| label: box plots by role
+
+results_clean |>
+  filter(rate_type == "Annual") |>
+  ggplot(aes(x = occupation_title, y = median/1000)) +
+  geom_boxplot() +
+  # Edit theme
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  labs(y = "Median annual salary (thousands)",
+       x = "")
+```
+
+Get number employed data to simulate a distribution.
+
+```{r}
+#| label: get df
+
+path <- "https://www.bls.gov/oes/special-requests/oesm23all.zip"
+
+df <- read_
+```
