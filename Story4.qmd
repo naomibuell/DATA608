@@ -12,6 +12,8 @@ library(tidyverse)
 library(janitor)
 library(jsonlite)
 library(httr2)
+library(scales)
+set.seed(123)
 ```
 
 ## Intro
@@ -236,7 +238,104 @@ Get number employed data to simulate a distribution.
 ```{r}
 #| label: get df
 
-path <- "https://www.bls.gov/oes/special-requests/oesm23all.zip"
+path <- "https://raw.githubusercontent.com/naomibuell/DATA608/refs/heads/main/state_M2023_dl.csv"
+df <- read.csv(path, ) |> 
+  clean_names() |> 
+  mutate(
+    tot_emp = as.numeric(str_remove(tot_emp, ",")),
+    jobs_1000 = as.numeric(str_remove(jobs_1000, ",")),
+    across(starts_with("a_"), ~as.numeric(str_remove(., ",")))
+  ) |> 
+  select(area_title, prim_state, occ_title, tot_emp, jobs_1000, loc_quotient, starts_with("a_"))
 
-df <- read_
+df |> head()
+```
+
+```{r}
+#| label: boxplots but w/ non-api data
+
+df |> 
+  ggplot(aes(x = occ_title, y = a_median/1000)) +
+  geom_boxplot(varwidth = T) +
+  # Edit theme
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  labs(y = "Median annual salary (thousands)",
+       x = "")
+```
+
+```{r}
+#| label: boxplots but w/ widths
+
+df |> 
+  drop_na(tot_emp) |> 
+  uncount(tot_emp) |>
+  ggplot(aes(x = occ_title, y = a_median/1000)) +
+  geom_boxplot(varwidth = T) +
+  # Edit theme
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  labs(y = "Median annual salary (thousands)",
+       x = "")
+```
+
+```{r}
+#| label: boxplots but w/ widths adjusted for state population
+
+df |> 
+  mutate(jobs_adj = round(jobs_1000*1000)) |> 
+  drop_na(jobs_adj) |> 
+  uncount(jobs_adj) |>
+  ggplot(aes(x = occ_title, y = a_median/1000)) +
+  geom_boxplot(varwidth = T) +
+  # Edit theme
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  labs(y = "Median annual salary (thousands)",
+       x = "")
+```
+
+```{r}
+#| label: simulate distribution
+
+distribution <- df |>
+  drop_na(tot_emp) |>
+  rowwise() |>
+  mutate(
+    values = list(c(
+      rep(a_pct10, 1),
+      rep(a_pct25, 2),
+      rep(a_median, 4),
+      rep(a_pct75, 2),
+      rep(a_pct90, 1)
+    ))) |>
+  unnest(values) |>
+  uncount(tot_emp/10)
+
+distribution |> 
+  ggplot(aes(x = occ_title, y = values/1000)) +
+  geom_boxplot(varwidth = T) +
+  # Edit theme
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  labs(y = "Median annual salary (thousands)",
+       x = "")
+```
+
+```{r}
+#| label: simualated distribution boxplots, by state
+
+distribution |> 
+  ggplot(aes(y = prim_state, x = values/1000)) +
+  geom_boxplot(varwidth = T) +
+  # Edit theme
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  labs(y = "Median annual salary (thousands)",
+       x = "")
 ```
